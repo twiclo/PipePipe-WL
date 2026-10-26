@@ -1,0 +1,73 @@
+name: Publish PipePipe WL APKs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pipepipe-wl-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check signing secrets
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.PIPEPIPE_WL_KEYSTORE_BASE64 }}
+          KEY_PASSWORD: ${{ secrets.PIPEPIPE_WL_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo 'Signing secrets are not configured; no release was published.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.signing.outputs.ready == 'true'
+
+      - name: Set up JDK 25
+        if: steps.signing.outputs.ready == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+
+      - name: Build signed release
+        if: steps.signing.outputs.ready == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.PIPEPIPE_WL_KEYSTORE_BASE64 }}
+          KEY_STORE_PASSWORD: ${{ secrets.PIPEPIPE_WL_KEY_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.PIPEPIPE_WL_KEY_PASSWORD }}
+          KEY_ALIAS: pipepipe-wl
+          WL_BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          git config -f .gitmodules submodule.PipePipeExtractor.url \
+            https://github.com/InfinityLoop1308/PipePipeExtractor.git
+          git submodule sync PipePipeExtractor
+          git submodule update --init PipePipeClient PipePipeExtractor
+          KEY_PATH="$RUNNER_TEMP/pipepipe-wl.p12"
+          export KEY_PATH
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEY_PATH"
+          cd PipePipeClient
+          ./gradlew :app:assembleRelease -DpackageSuffix=.wl --console=plain
+
+      - name: Publish GitHub Release
+        if: steps.signing.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          metadata=PipePipeClient/app/build/outputs/apk/release/output-metadata.json
+          version=$(jq -r '.elements[0].versionName' "$metadata")
+          tag="v$version"
+          gh release create "$tag" PipePipeClient/app/build/outputs/apk/release/*.apk \
+            --target "$GITHUB_SHA" \
+            --title "PipePipe WL $version" \
+            --notes 'Signed PipePipe WL APKs. Choose the APK matching your device architecture.'
